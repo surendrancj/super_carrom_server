@@ -1,11 +1,11 @@
 {
   "name": "super_carrom_server",
   "version": "1.0.0",
-  "main": "index.js",
+  "main": "dist/arena.config.js",
   "scripts": {
     "dev":   "ts-node-dev --respawn --transpile-only src/index.ts",
     "build": "tsc",
-    "start": "ts-node --transpile-only arena.config.ts"
+    "start": "node dist/arena.config.js"
   },
   "keywords": [],
   "author": "",

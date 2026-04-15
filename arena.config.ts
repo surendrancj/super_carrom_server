@@ -1,10 +1,10 @@
-import { listen } from '@colyseus/tools';
+import config, { listen } from '@colyseus/tools';
 import { CarromRoom } from './src/rooms/CarromRoom';
 import cors from 'cors';
 
 const PORT = Number(process.env.PORT) || 3000;
 
-listen({
+const appConfig = config({
     initializeGameServer(gameServer) {
         gameServer.define('carrom', CarromRoom).enableRealtimeListing();
     },
@@ -17,4 +17,6 @@ listen({
     beforeListen() {
         console.log(`[carrom] starting on port ${PORT}`);
     },
-}, PORT);
+});
+
+listen(appConfig, PORT);
