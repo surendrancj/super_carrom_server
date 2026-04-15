@@ -5,7 +5,7 @@
   "scripts": {
     "dev":   "ts-node-dev --respawn --transpile-only src/index.ts",
     "build": "tsc",
-    "start": "ts-node arena.config.ts"
+    "start": "ts-node --transpile-only arena.config.ts"
   },
   "keywords": [],
   "author": "",
