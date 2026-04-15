@@ -81,8 +81,9 @@ export class CarromRoom extends Room {
         this._physics.setWalls(130, 670, 130, 670);
         this._initCoins();
 
-        this.onMessage('fire',  (client, data: ShotMessage) => this._handleFire(client, data));
-        this.onMessage('ready', (client) => this._handleReady(client));
+        this.onMessage('fire',        (client, data: ShotMessage)    => this._handleFire(client, data));
+        this.onMessage('ready',       (client)                        => this._handleReady(client));
+        this.onMessage('striker_pos', (client, data: { x: number })  => this._handleStrikerPos(client, data));
 
         console.log(`[room] ${this.roomId} created`);
     }
@@ -250,6 +251,12 @@ export class CarromRoom extends Room {
         });
 
         console.log(`[room] settled — turn → ${this._turn}`);
+    }
+
+    private _handleStrikerPos(client: Client, data: { x: number }) {
+        if (client.sessionId !== this._turn) return;
+        if (this._phase !== 'playing') return;
+        this.broadcast('striker_pos', { x: data.x }, { except: client });
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
