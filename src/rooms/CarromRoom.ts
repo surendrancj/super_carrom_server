@@ -1,9 +1,8 @@
 import { Room, Client } from 'colyseus';
-import { GameState, CoinState, PlayerState } from '../schema/GameState';
 import { PhysicsSystem } from '../physics/PhysicsSystem';
 
 // ── Constants (must match client GameConfig) ──────────────────────────────────
-const COIN_RADIUS    = 15.6;  // physicsRadius
+const COIN_RADIUS    = 15.6;
 const STRIKER_RADIUS = 23.6;
 const POCKET_RADIUS  = 30;
 
@@ -34,13 +33,27 @@ const COIN_LAYOUT = [
     { id: 'w9',   kind: 'white', x: 368.88, y: 346.09 },
 ];
 
-// Striker rail configs (y positions on 800px board)
 const RAILS = {
-    bottom: { y: 645, minX: 220, maxX: 580 },  // human / player 1
-    top:    { y: 155, minX: 220, maxX: 580 },  // opponent / player 2
+    bottom: { y: 645, minX: 220, maxX: 580 },
+    top:    { y: 155, minX: 220, maxX: 580 },
 };
 
-// ── Types ─────────────────────────────────────────────────────────────────────
+// ── Plain-object state (no schema — avoids version-mismatch decode crash) ─────
+interface PlayerInfo {
+    sessionId: string;
+    side:      'bottom' | 'top';
+    ready:     boolean;
+    connected: boolean;
+}
+
+interface CoinInfo {
+    id:     string;
+    kind:   string;
+    x:      number;
+    y:      number;
+    active: boolean;
+}
+
 interface ShotMessage {
     strikerX: number;
     angle:    number;
@@ -51,59 +64,58 @@ interface ShotMessage {
 export class CarromRoom extends Room {
     maxClients = 2;
 
-    private _physics!: PhysicsSystem;
-    private _strikerIds: Record<string, number> = {}; // sessionId → physics body id
-    private _coinIds:    Record<string, number> = {}; // coin id string → physics body id
-    private _simulating = false;
-
-    // Typed accessor — avoids casting everywhere
-    private get gs(): GameState { return this.state as GameState; }
+    private _physics!:   PhysicsSystem;
+    private _strikerIds: Record<string, number> = {};
+    private _coinIds:    Record<string, number> = {};
+    private _coins:      Map<string, CoinInfo>  = new Map();
+    private _players:    Map<string, PlayerInfo> = new Map();
+    private _turn        = '';
+    private _phase       = 'waiting';
+    private _simulating  = false;
 
     // ── Lifecycle ─────────────────────────────────────────────────────────────
 
-    onCreate(options: any) {
-        this.setState(new GameState() as any);
+    onCreate(_options: any) {
+        // No setState — plain objects only, avoids client schema decode crash
         this._physics = new PhysicsSystem();
         this._physics.setWalls(130, 670, 130, 670);
         this._initCoins();
 
-        this.onMessage('fire', (client, data: ShotMessage) => this._handleFire(client, data));
+        this.onMessage('fire',  (client, data: ShotMessage) => this._handleFire(client, data));
         this.onMessage('ready', (client) => this._handleReady(client));
 
         console.log(`[room] ${this.roomId} created`);
     }
 
     onJoin(client: Client) {
-        const isFirst = this.gs.players.size === 0;
-        const player  = new PlayerState();
-        player.sessionId = client.sessionId;
-        player.side      = isFirst ? 'bottom' : 'top';
-        player.connected = true;
-        this.gs.players.set(client.sessionId, player);
+        const isFirst = this._players.size === 0;
+        const player: PlayerInfo = {
+            sessionId: client.sessionId,
+            side:      isFirst ? 'bottom' : 'top',
+            ready:     false,
+            connected: true,
+        };
+        this._players.set(client.sessionId, player);
 
-        // Create striker physics body for this player
         const rail = isFirst ? RAILS.bottom : RAILS.top;
         const sid  = this._physics.createKinematicCircle(rail.minX, rail.y, STRIKER_RADIUS);
         this._strikerIds[client.sessionId] = sid;
 
         console.log(`[room] ${client.sessionId} joined as ${player.side}`);
 
-        // Two players in — game can start once both ready
-        if (this.gs.players.size === 2) {
+        if (this._players.size === 2) {
             this.broadcast('waiting_ready', {});
         }
     }
 
     onLeave(client: Client, code?: number) {
-        const player = this.gs.players.get(client.sessionId);
+        const player = this._players.get(client.sessionId);
         if (player) {
             player.connected = false;
             const consented  = code === 1000;
             if (!consented) {
-                // Give 30s to reconnect
                 this.allowReconnection(client, 30).catch(() => {
-                    this.gs.phase  = 'gameover';
-                    this.gs.winner = this._opponent(client.sessionId)?.sessionId ?? '';
+                    this._phase = 'gameover';
                 });
             }
         }
@@ -116,50 +128,45 @@ export class CarromRoom extends Room {
     // ── Message handlers ──────────────────────────────────────────────────────
 
     private _handleReady(client: Client) {
-        const player = this.gs.players.get(client.sessionId);
+        const player = this._players.get(client.sessionId);
         if (player) player.ready = true;
 
-        const players = Array.from(this.gs.players.values());
+        const players = Array.from(this._players.values());
         if (players.length === 2 && players.every(p => p.ready)) {
-            this.gs.phase = 'playing';
-            // Bottom player (first to join) goes first
+            this._phase = 'playing';
             const first = players.find(p => p.side === 'bottom')!;
-            this.gs.turn = first.sessionId;
-            this.broadcast('game_start', { turn: this.gs.turn });
-            console.log(`[room] game started — first turn: ${this.gs.turn}`);
+            this._turn  = first.sessionId;
+            this.broadcast('game_start', { turn: this._turn });
+            console.log(`[room] game started — first turn: ${this._turn}`);
         }
     }
 
     private _handleFire(client: Client, data: ShotMessage) {
-        if (this.gs.phase !== 'playing') return;
-        if (client.sessionId !== this.gs.turn) return;  // not your turn
-        if (this._simulating) return;                       // physics already running
+        if (this._phase !== 'playing') return;
+        if (client.sessionId !== this._turn) return;
+        if (this._simulating) return;
 
-        const player = this.gs.players.get(client.sessionId)!;
-        const rail   = RAILS[player.side as 'bottom' | 'top'];
+        const player = this._players.get(client.sessionId)!;
+        const rail   = RAILS[player.side];
 
-        // Clamp striker X to valid range
         const sx = Math.max(rail.minX, Math.min(rail.maxX, data.strikerX));
         const sy = rail.y;
 
-        // Place and launch striker
         const sid = this._strikerIds[client.sessionId];
         this._physics.setBodyType(sid, 'dynamic');
         this._physics.setPosition(sid, sx, sy);
 
-        const MAX_DRAG = 70;
-        const MAX_SPEED_MS = 18;
-        const speed = data.power * MAX_SPEED_MS;
+        const speed = data.power * 18;
         this._physics.setVelocity(sid, Math.cos(data.angle) * speed, Math.sin(data.angle) * speed);
 
-        // Tell ALL clients to start their local simulation (client-side prediction)
         this.broadcast('shot_fired', {
-            by: client.sessionId,
-            strikerX: sx, strikerY: sy,
-            angle: data.angle, power: data.power,
+            sessionId: client.sessionId,
+            strikerX:  sx,
+            strikerY:  sy,
+            angle:     data.angle,
+            power:     data.power,
         });
 
-        // Run server simulation
         this._simulating = true;
         this._runSimulation(client.sessionId, sid);
     }
@@ -167,37 +174,25 @@ export class CarromRoom extends Room {
     // ── Server-side physics simulation ────────────────────────────────────────
 
     private _runSimulation(firingSessionId: string, strikerId: number) {
-        const allBodyIds = [
-            strikerId,
-            ...Object.values(this._coinIds),
-        ];
-
-        const STEP_MS  = 16;     // simulate in 16ms steps
-        const MAX_STEPS = 6000;  // 6000 × 16ms = 96s hard cap
-        let steps = 0;
+        const allBodyIds = [strikerId, ...Object.values(this._coinIds)];
+        const STEP_MS    = 16;
+        const MAX_STEPS  = 6000;
+        let   steps      = 0;
 
         const tick = () => {
             const dt = STEP_MS / 1000;
-
-            // Decelerate and step
             for (const id of allBodyIds) {
                 this._physics.applyDeceleration(id, dt);
                 this._physics.stopIfSlow(id);
             }
             this._physics.step(dt);
-
             steps++;
-
-            // Check pocket sinks
             this._checkPockets(strikerId);
 
-            // Keep going until everything stops or cap reached
             if (!this._physics.allStopped(allBodyIds) && steps < MAX_STEPS) {
                 setImmediate(tick);
                 return;
             }
-
-            // Simulation settled — send authoritative state to all clients
             this._onSimulationComplete(firingSessionId, strikerId);
         };
 
@@ -206,16 +201,15 @@ export class CarromRoom extends Room {
 
     private _checkPockets(strikerId: number) {
         for (const [coinStrId, physId] of Object.entries(this._coinIds)) {
-            const coinState = this.gs.coins.get(coinStrId);
-            if (!coinState || !coinState.active) continue;
+            const coin = this._coins.get(coinStrId);
+            if (!coin || !coin.active) continue;
 
             const pos = this._physics.getPosition(physId);
             for (const pocket of POCKETS) {
-                const dist = Math.hypot(pos.x - pocket.x, pos.y - pocket.y);
-                if (dist < POCKET_RADIUS) {
-                    coinState.active = false;
-                    coinState.x = pocket.x;
-                    coinState.y = pocket.y;
+                if (Math.hypot(pos.x - pocket.x, pos.y - pocket.y) < POCKET_RADIUS) {
+                    coin.active = false;
+                    coin.x = pocket.x;
+                    coin.y = pocket.y;
                     this._physics.setVelocity(physId, 0, 0);
                     this._physics.setBodyType(physId, 'kinematic');
                     break;
@@ -223,13 +217,12 @@ export class CarromRoom extends Room {
             }
         }
 
-        // Striker pocket (foul)
         const sp = this._physics.getPosition(strikerId);
         for (const pocket of POCKETS) {
             if (Math.hypot(sp.x - pocket.x, sp.y - pocket.y) < POCKET_RADIUS) {
                 this._physics.setVelocity(strikerId, 0, 0);
                 this._physics.setBodyType(strikerId, 'kinematic');
-                this._physics.setPosition(strikerId, -200, -200); // park off-board
+                this._physics.setPosition(strikerId, -200, -200);
                 break;
             }
         }
@@ -237,56 +230,40 @@ export class CarromRoom extends Room {
 
     private _onSimulationComplete(firingSessionId: string, strikerId: number) {
         this._simulating = false;
-
-        // Reset striker to off-board (kinematic, parked)
         this._physics.setVelocity(strikerId, 0, 0);
         this._physics.setBodyType(strikerId, 'kinematic');
 
-        // Sync authoritative coin positions into schema
         const settledCoins: Record<string, { x: number; y: number; active: boolean }> = {};
         for (const [coinStrId, physId] of Object.entries(this._coinIds)) {
-            const coinState = this.gs.coins.get(coinStrId)!;
-            const pos = this._physics.getPosition(physId);
-            coinState.x = pos.x;
-            coinState.y = pos.y;
-            settledCoins[coinStrId] = { x: pos.x, y: pos.y, active: coinState.active };
+            const coin = this._coins.get(coinStrId)!;
+            const pos  = this._physics.getPosition(physId);
+            coin.x = pos.x;
+            coin.y = pos.y;
+            settledCoins[coinStrId] = { x: pos.x, y: pos.y, active: coin.active };
         }
 
-        // TODO: full carrom rules (_endTurn logic) — for now just switch turn
         this._switchTurn(firingSessionId);
 
-        // Send settled state — clients reconcile by lerping any drifted coins
         this.broadcast('settled', {
             coins: settledCoins,
-            turn:  this.gs.turn,
+            turn:  this._turn,
         });
 
-        console.log(`[room] simulation complete — turn → ${this.gs.turn}`);
+        console.log(`[room] settled — turn → ${this._turn}`);
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
 
     private _switchTurn(currentSessionId: string) {
-        const next = Array.from(this.gs.players.keys())
+        const next = Array.from(this._players.keys())
             .find(id => id !== currentSessionId);
-        this.gs.turn = next ?? currentSessionId;
-    }
-
-    private _opponent(sessionId: string): PlayerState | undefined {
-        return Array.from(this.gs.players.values())
-            .find(p => p.sessionId !== sessionId);
+        this._turn = next ?? currentSessionId;
     }
 
     private _initCoins() {
         for (const coin of COIN_LAYOUT) {
-            const coinState = new CoinState();
-            coinState.id     = coin.id;
-            coinState.kind   = coin.kind;
-            coinState.x      = coin.x;
-            coinState.y      = coin.y;
-            coinState.active = true;
-            this.gs.coins.set(coin.id, coinState);
-
+            const info: CoinInfo = { ...coin, active: true };
+            this._coins.set(coin.id, info);
             const physId = this._physics.createDynamicCircle(coin.x, coin.y, COIN_RADIUS);
             this._coinIds[coin.id] = physId;
         }
