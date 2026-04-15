@@ -137,7 +137,11 @@ export class CarromRoom extends Room {
             this._phase = 'playing';
             const first = players.find(p => p.side === 'bottom')!;
             this._turn  = first.sessionId;
-            this.broadcast('game_start', { turn: this._turn });
+            // Include coin layout so clients can assign matching string IDs and snap positions
+            const coins = Array.from(this._coins.values()).map(c => ({
+                id: c.id, kind: c.kind, x: c.x, y: c.y,
+            }));
+            this.broadcast('game_start', { turn: this._turn, coins });
             console.log(`[room] game started — first turn: ${this._turn}`);
         }
     }
