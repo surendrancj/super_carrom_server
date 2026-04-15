@@ -2,9 +2,10 @@ import { Room, Client } from 'colyseus';
 import { PhysicsSystem } from '../physics/PhysicsSystem';
 
 // ── Constants (must match client GameConfig) ──────────────────────────────────
-const COIN_RADIUS    = 15.6;
-const STRIKER_RADIUS = 23.6;
-const POCKET_RADIUS  = 30;
+// Must match client src/config/GameConfig.js exactly
+const COIN_RADIUS    = 14.2;  // COIN.physicsRadius
+const STRIKER_RADIUS = 25;    // STRIKER.radius
+const POCKET_RADIUS  = 28;    // POCKET_RADIUS
 
 const POCKETS = [
     { x: 130, y: 130 }, { x: 670, y: 130 },
