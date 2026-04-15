@@ -38,6 +38,9 @@ const RAILS = {
     top:    { y: 155, minX: 220, maxX: 580 },
 };
 
+// Must match client GameConfig.js SHOT values exactly
+const SHOT = { minPower: 2, maxPower: 32 };
+
 // ── Plain-object state (no schema — avoids version-mismatch decode crash) ─────
 interface PlayerInfo {
     sessionId: string;
@@ -161,7 +164,7 @@ export class CarromRoom extends Room {
         this._physics.setBodyType(sid, 'dynamic');
         this._physics.setPosition(sid, sx, sy);
 
-        const speed = data.power * 18;
+        const speed = SHOT.minPower + data.power * (SHOT.maxPower - SHOT.minPower);
         this._physics.setVelocity(sid, Math.cos(data.angle) * speed, Math.sin(data.angle) * speed);
 
         this.broadcast('shot_fired', {
