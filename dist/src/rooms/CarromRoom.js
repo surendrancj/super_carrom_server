@@ -4,9 +4,10 @@ exports.CarromRoom = void 0;
 const colyseus_1 = require("colyseus");
 const PhysicsSystem_1 = require("../physics/PhysicsSystem");
 // ── Constants (must match client GameConfig) ──────────────────────────────────
-const COIN_RADIUS = 15.6;
-const STRIKER_RADIUS = 23.6;
-const POCKET_RADIUS = 30;
+// Must match client src/config/GameConfig.js exactly
+const COIN_RADIUS = 14.2; // COIN.physicsRadius
+const STRIKER_RADIUS = 25; // STRIKER.radius
+const POCKET_RADIUS = 28; // POCKET_RADIUS
 const POCKETS = [
     { x: 130, y: 130 }, { x: 670, y: 130 },
     { x: 130, y: 670 }, { x: 670, y: 670 },
@@ -36,6 +37,8 @@ const RAILS = {
     bottom: { y: 645, minX: 220, maxX: 580 },
     top: { y: 155, minX: 220, maxX: 580 },
 };
+// Must match client GameConfig.js SHOT values exactly
+const SHOT = { minPower: 2, maxPower: 32 };
 // ── Room ──────────────────────────────────────────────────────────────────────
 class CarromRoom extends colyseus_1.Room {
     constructor() {
@@ -57,6 +60,7 @@ class CarromRoom extends colyseus_1.Room {
         this._initCoins();
         this.onMessage('fire', (client, data) => this._handleFire(client, data));
         this.onMessage('ready', (client) => this._handleReady(client));
+        this.onMessage('striker_pos', (client, data) => this._handleStrikerPos(client, data));
         console.log(`[room] ${this.roomId} created`);
     }
     onJoin(client) {
@@ -101,7 +105,11 @@ class CarromRoom extends colyseus_1.Room {
             this._phase = 'playing';
             const first = players.find(p => p.side === 'bottom');
             this._turn = first.sessionId;
-            this.broadcast('game_start', { turn: this._turn });
+            // Include coin layout so clients can assign matching string IDs and snap positions
+            const coins = Array.from(this._coins.values()).map(c => ({
+                id: c.id, kind: c.kind, x: c.x, y: c.y,
+            }));
+            this.broadcast('game_start', { turn: this._turn, coins });
             console.log(`[room] game started — first turn: ${this._turn}`);
         }
     }
@@ -119,7 +127,7 @@ class CarromRoom extends colyseus_1.Room {
         const sid = this._strikerIds[client.sessionId];
         this._physics.setBodyType(sid, 'dynamic');
         this._physics.setPosition(sid, sx, sy);
-        const speed = data.power * 18;
+        const speed = SHOT.minPower + data.power * (SHOT.maxPower - SHOT.minPower);
         this._physics.setVelocity(sid, Math.cos(data.angle) * speed, Math.sin(data.angle) * speed);
         this.broadcast('shot_fired', {
             sessionId: client.sessionId,
@@ -139,12 +147,15 @@ class CarromRoom extends colyseus_1.Room {
         let steps = 0;
         const tick = () => {
             const dt = STEP_MS / 1000;
+            // Step first (matching client update() order: step → deceleration → checkPockets).
+            // Reversing this order (decel before step) causes the server to stop coins at
+            // different positions than the client, making settled positions look "early".
+            this._physics.step(dt);
+            steps++;
             for (const id of allBodyIds) {
                 this._physics.applyDeceleration(id, dt);
                 this._physics.stopIfSlow(id);
             }
-            this._physics.step(dt);
-            steps++;
             this._checkPockets(strikerId);
             if (!this._physics.allStopped(allBodyIds) && steps < MAX_STEPS) {
                 setImmediate(tick);
@@ -199,6 +210,13 @@ class CarromRoom extends colyseus_1.Room {
             turn: this._turn,
         });
         console.log(`[room] settled — turn → ${this._turn}`);
+    }
+    _handleStrikerPos(client, data) {
+        if (client.sessionId !== this._turn)
+            return;
+        if (this._phase !== 'playing')
+            return;
+        this.broadcast('striker_pos', { x: data.x }, { except: client });
     }
     // ── Helpers ───────────────────────────────────────────────────────────────
     _switchTurn(currentSessionId) {

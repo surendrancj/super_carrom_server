@@ -190,12 +190,15 @@ export class CarromRoom extends Room {
 
         const tick = () => {
             const dt = STEP_MS / 1000;
+            // Step first (matching client update() order: step → deceleration → checkPockets).
+            // Reversing this order (decel before step) causes the server to stop coins at
+            // different positions than the client, making settled positions look "early".
+            this._physics.step(dt);
+            steps++;
             for (const id of allBodyIds) {
                 this._physics.applyDeceleration(id, dt);
                 this._physics.stopIfSlow(id);
             }
-            this._physics.step(dt);
-            steps++;
             this._checkPockets(strikerId);
 
             if (!this._physics.allStopped(allBodyIds) && steps < MAX_STEPS) {

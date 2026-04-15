@@ -4,13 +4,14 @@
 // Runs identically on server (Node.js) and client (browser/V8).
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.PhysicsSystem = void 0;
-const SCALE = 100; // px per metre — must match client GameConfig
+// ── Constants — must be kept in sync with client src/config/GameConfig.js ──────
+const SCALE = 50; // px per metre — MUST match GameConfig.js SCALE
 const PHYSICS = {
-    coin: { density: 1.0, restitution: 0.75 },
-    striker: { density: 2.0, restitution: 0.70 },
-    wall: { restitution: 0.65 },
-    deceleration: 4.5, // m/s²
-    stopThreshold: 0.03, // m/s
+    coin: { density: 1.0, restitution: 0.85 },
+    striker: { density: 1.0, restitution: 0.85 },
+    wall: { restitution: 0.85 },
+    deceleration: 10.0, // m/s²  — GameConfig.js PHYSICS.deceleration
+    stopThreshold: 0.5, // m/s   — GameConfig.js PHYSICS.stopThreshold
 };
 class PhysicsSystem {
     constructor() {
