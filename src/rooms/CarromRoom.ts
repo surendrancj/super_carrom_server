@@ -176,13 +176,17 @@ export class CarromRoom extends Room {
         this._physics.setPosition(sid, sx, sy);
 
         const speed = SHOT.minPower + data.power * (SHOT.maxPower - SHOT.minPower);
-        this._physics.setVelocity(sid, Math.cos(data.angle) * speed, Math.sin(data.angle) * speed);
+        const vx = Math.cos(data.angle) * speed;
+        const vy = Math.sin(data.angle) * speed;
+        this._physics.setVelocity(sid, vx, vy);
 
         this.broadcast('shot_fired', {
             sessionId: client.sessionId,
             strikerX:  sx,
             strikerY:  sy,
             angle:     data.angle,
+            vx,
+            vy,
             power:     data.power,
         });
 
