@@ -7,11 +7,6 @@ const COIN_RADIUS    = 14.2;  // COIN.physicsRadius
 const STRIKER_RADIUS = 25;    // STRIKER.radius
 const POCKET_RADIUS  = 28;    // POCKET_RADIUS
 
-const POCKETS = [
-    { x: 130, y: 130 }, { x: 670, y: 130 },
-    { x: 130, y: 670 }, { x: 670, y: 670 },
-];
-
 const COIN_LAYOUT: Array<{ id: string; kind: 'black' | 'white' | 'red'; x: number; y: number }> = (() => {
     const raw: Array<{ kind: 'black' | 'white' | 'red'; x: number; y: number }> = [
         { x: 400, y: 400, kind: 'red' },
@@ -44,9 +39,29 @@ const COIN_LAYOUT: Array<{ id: string; kind: 'black' | 'white' | 'red'; x: numbe
     });
 })();
 
-const RAILS = {
-    bottom: { y: 645, minX: 220, maxX: 580 },
-    top:    { y: 155, minX: 220, maxX: 580 },
+type Side = 'bottom' | 'top';
+
+interface WallsConfig { left: number; right: number; top: number; bottom: number; }
+interface PocketConfig { x: number; y: number; }
+interface RailConfig { y: number; minX: number; maxX: number; }
+
+interface GameConfigWire {
+    walls?: WallsConfig;
+    pockets?: PocketConfig[];
+    pocketRadius?: number;
+    striker?: RailConfig;
+    aiStriker?: RailConfig;
+}
+
+const DEFAULT_CONFIG: Required<GameConfigWire> = {
+    walls: { left: 130, right: 670, top: 130, bottom: 670 },
+    pockets: [
+        { x: 130, y: 130 }, { x: 670, y: 130 },
+        { x: 130, y: 670 }, { x: 670, y: 670 },
+    ],
+    pocketRadius: POCKET_RADIUS,
+    striker: { y: 645, minX: 220, maxX: 580 },
+    aiStriker: { y: 155, minX: 220, maxX: 580 },
 };
 
 // Must match client GameConfig.js SHOT values exactly
@@ -74,11 +89,92 @@ interface ShotMessage {
     power:    number;
 }
 
+function _num(n: any, fallback: number) {
+    return (typeof n === 'number' && Number.isFinite(n)) ? n : fallback;
+}
+
+function _normalizeConfig(input: any): Required<GameConfigWire> {
+    const cfg = input && typeof input === 'object' ? input as GameConfigWire : {};
+
+    const walls = cfg.walls && typeof cfg.walls === 'object'
+        ? {
+            left:   _num(cfg.walls.left,   DEFAULT_CONFIG.walls.left),
+            right:  _num(cfg.walls.right,  DEFAULT_CONFIG.walls.right),
+            top:    _num(cfg.walls.top,    DEFAULT_CONFIG.walls.top),
+            bottom: _num(cfg.walls.bottom, DEFAULT_CONFIG.walls.bottom),
+        }
+        : { ...DEFAULT_CONFIG.walls };
+
+    const pockets = Array.isArray(cfg.pockets) && cfg.pockets.length > 0
+        ? cfg.pockets
+            .filter(p => p && typeof p === 'object')
+            .map(p => ({ x: _num((p as any).x, 0), y: _num((p as any).y, 0) }))
+            .filter(p => Number.isFinite(p.x) && Number.isFinite(p.y))
+        : [...DEFAULT_CONFIG.pockets];
+
+    const striker = cfg.striker && typeof cfg.striker === 'object'
+        ? {
+            y:    _num(cfg.striker.y,    DEFAULT_CONFIG.striker.y),
+            minX: _num(cfg.striker.minX, DEFAULT_CONFIG.striker.minX),
+            maxX: _num(cfg.striker.maxX, DEFAULT_CONFIG.striker.maxX),
+        }
+        : { ...DEFAULT_CONFIG.striker };
+
+    const aiStriker = cfg.aiStriker && typeof cfg.aiStriker === 'object'
+        ? {
+            y:    _num(cfg.aiStriker.y,    DEFAULT_CONFIG.aiStriker.y),
+            minX: _num(cfg.aiStriker.minX, DEFAULT_CONFIG.aiStriker.minX),
+            maxX: _num(cfg.aiStriker.maxX, DEFAULT_CONFIG.aiStriker.maxX),
+        }
+        : { ...DEFAULT_CONFIG.aiStriker };
+
+    if (striker.minX > striker.maxX) [striker.minX, striker.maxX] = [striker.maxX, striker.minX];
+    if (aiStriker.minX > aiStriker.maxX) [aiStriker.minX, aiStriker.maxX] = [aiStriker.maxX, aiStriker.minX];
+
+    return {
+        walls,
+        pockets: pockets.length ? pockets : [...DEFAULT_CONFIG.pockets],
+        pocketRadius: _num(cfg.pocketRadius, DEFAULT_CONFIG.pocketRadius),
+        striker,
+        aiStriker,
+    };
+}
+
+function _normalizeCoinLayout(input: any): Array<{ id: string; kind: 'black' | 'white' | 'red'; x: number; y: number }> {
+    if (!Array.isArray(input)) return COIN_LAYOUT;
+
+    const raw = input
+        .filter(c => c && typeof c === 'object')
+        .map(c => {
+            const kind = (c as any).kind ?? (c as any).type;
+            const x = (c as any).x;
+            const y = (c as any).y;
+            return { kind, x, y };
+        })
+        .filter(c => (c.kind === 'black' || c.kind === 'white' || c.kind === 'red')
+            && typeof c.x === 'number' && Number.isFinite(c.x)
+            && typeof c.y === 'number' && Number.isFinite(c.y)
+        ) as Array<{ kind: 'black' | 'white' | 'red'; x: number; y: number }>;
+
+    if (raw.length === 0) return COIN_LAYOUT;
+
+    let red = 0;
+    let black = 0;
+    let white = 0;
+    return raw.map((c) => {
+        if (c.kind === 'red') return { id: (++red === 1) ? 'red' : `r${red}`, ...c };
+        if (c.kind === 'black') return { id: `b${++black}`, ...c };
+        return { id: `w${++white}`, ...c };
+    });
+}
+
 // ── Room ──────────────────────────────────────────────────────────────────────
 export class CarromRoom extends Room {
     maxClients = 2;
 
     private _physics!:   PhysicsSystem;
+    private _config:     Required<GameConfigWire> = DEFAULT_CONFIG;
+    private _rails:      Record<Side, RailConfig> = { bottom: DEFAULT_CONFIG.striker, top: DEFAULT_CONFIG.aiStriker };
     private _strikerIds: Record<string, number> = {};
     private _coinIds:    Record<string, number> = {};
     private _coins:      Map<string, CoinInfo>  = new Map();
@@ -89,11 +185,18 @@ export class CarromRoom extends Room {
 
     // ── Lifecycle ─────────────────────────────────────────────────────────────
 
-    onCreate(_options: any) {
+    onCreate(options: any) {
         // No setState — plain objects only, avoids client schema decode crash
+        this._config = _normalizeConfig(options?.gameConfig);
+        this._rails  = { bottom: this._config.striker, top: this._config.aiStriker };
         this._physics = new PhysicsSystem();
-        this._physics.setWalls(130, 670, 130, 670);
-        this._initCoins();
+        this._physics.setWalls(
+            this._config.walls.left,
+            this._config.walls.right,
+            this._config.walls.top,
+            this._config.walls.bottom,
+        );
+        this._initCoins(_normalizeCoinLayout(options?.coinLayout));
 
         this.onMessage('fire',        (client, data: ShotMessage)    => this._handleFire(client, data));
         this.onMessage('ready',       (client)                        => this._handleReady(client));
@@ -112,8 +215,9 @@ export class CarromRoom extends Room {
         };
         this._players.set(client.sessionId, player);
 
-        const rail = isFirst ? RAILS.bottom : RAILS.top;
-        const sid  = this._physics.createKinematicCircle(rail.minX, rail.y, STRIKER_RADIUS);
+        const rail = isFirst ? this._rails.bottom : this._rails.top;
+        const sx = (rail.minX + rail.maxX) / 2;
+        const sid  = this._physics.createKinematicCircle(sx, rail.y, STRIKER_RADIUS);
         this._strikerIds[client.sessionId] = sid;
 
         console.log(`[room] ${client.sessionId} joined as ${player.side}`);
@@ -155,7 +259,7 @@ export class CarromRoom extends Room {
             const coins = Array.from(this._coins.values()).map(c => ({
                 id: c.id, kind: c.kind, x: c.x, y: c.y,
             }));
-            this.broadcast('game_start', { turn: this._turn, coins });
+            this.broadcast('game_start', { turn: this._turn, coins, config: this._config });
             console.log(`[room] game started — first turn: ${this._turn}`);
         }
     }
@@ -166,7 +270,7 @@ export class CarromRoom extends Room {
         if (this._simulating) return;
 
         const player = this._players.get(client.sessionId)!;
-        const rail   = RAILS[player.side];
+        const rail   = this._rails[player.side];
 
         const sx = Math.max(rail.minX, Math.min(rail.maxX, data.strikerX));
         const sy = rail.y;
@@ -231,8 +335,8 @@ export class CarromRoom extends Room {
             if (!coin || !coin.active) continue;
 
             const pos = this._physics.getPosition(physId);
-            for (const pocket of POCKETS) {
-                if (Math.hypot(pos.x - pocket.x, pos.y - pocket.y) < POCKET_RADIUS) {
+            for (const pocket of this._config.pockets) {
+                if (Math.hypot(pos.x - pocket.x, pos.y - pocket.y) < this._config.pocketRadius) {
                     coin.active = false;
                     coin.x = pocket.x;
                     coin.y = pocket.y;
@@ -244,8 +348,8 @@ export class CarromRoom extends Room {
         }
 
         const sp = this._physics.getPosition(strikerId);
-        for (const pocket of POCKETS) {
-            if (Math.hypot(sp.x - pocket.x, sp.y - pocket.y) < POCKET_RADIUS) {
+        for (const pocket of this._config.pockets) {
+            if (Math.hypot(sp.x - pocket.x, sp.y - pocket.y) < this._config.pocketRadius) {
                 this._physics.setVelocity(strikerId, 0, 0);
                 this._physics.setBodyType(strikerId, 'kinematic');
                 this._physics.setPosition(strikerId, -200, -200);
@@ -292,8 +396,8 @@ export class CarromRoom extends Room {
         this._turn = next ?? currentSessionId;
     }
 
-    private _initCoins() {
-        for (const coin of COIN_LAYOUT) {
+    private _initCoins(layout: Array<{ id: string; kind: 'black' | 'white' | 'red'; x: number; y: number }>) {
+        for (const coin of layout) {
             const info: CoinInfo = { ...coin, active: true };
             this._coins.set(coin.id, info);
             const physId = this._physics.createDynamicCircle(coin.x, coin.y, COIN_RADIUS);

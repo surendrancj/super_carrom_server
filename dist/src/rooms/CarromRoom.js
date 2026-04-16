@@ -8,10 +8,6 @@ const PhysicsSystem_1 = require("../physics/PhysicsSystem");
 const COIN_RADIUS = 14.2; // COIN.physicsRadius
 const STRIKER_RADIUS = 25; // STRIKER.radius
 const POCKET_RADIUS = 28; // POCKET_RADIUS
-const POCKETS = [
-    { x: 130, y: 130 }, { x: 670, y: 130 },
-    { x: 130, y: 670 }, { x: 670, y: 670 },
-];
 const COIN_LAYOUT = (() => {
     const raw = [
         { x: 400, y: 400, kind: 'red' },
@@ -44,17 +40,97 @@ const COIN_LAYOUT = (() => {
         return { id: `w${++white}`, ...c };
     });
 })();
-const RAILS = {
-    bottom: { y: 645, minX: 220, maxX: 580 },
-    top: { y: 155, minX: 220, maxX: 580 },
+const DEFAULT_CONFIG = {
+    walls: { left: 130, right: 670, top: 130, bottom: 670 },
+    pockets: [
+        { x: 130, y: 130 }, { x: 670, y: 130 },
+        { x: 130, y: 670 }, { x: 670, y: 670 },
+    ],
+    pocketRadius: POCKET_RADIUS,
+    striker: { y: 645, minX: 220, maxX: 580 },
+    aiStriker: { y: 155, minX: 220, maxX: 580 },
 };
 // Must match client GameConfig.js SHOT values exactly
 const SHOT = { minPower: 2, maxPower: 32 };
+function _num(n, fallback) {
+    return (typeof n === 'number' && Number.isFinite(n)) ? n : fallback;
+}
+function _normalizeConfig(input) {
+    const cfg = input && typeof input === 'object' ? input : {};
+    const walls = cfg.walls && typeof cfg.walls === 'object'
+        ? {
+            left: _num(cfg.walls.left, DEFAULT_CONFIG.walls.left),
+            right: _num(cfg.walls.right, DEFAULT_CONFIG.walls.right),
+            top: _num(cfg.walls.top, DEFAULT_CONFIG.walls.top),
+            bottom: _num(cfg.walls.bottom, DEFAULT_CONFIG.walls.bottom),
+        }
+        : { ...DEFAULT_CONFIG.walls };
+    const pockets = Array.isArray(cfg.pockets) && cfg.pockets.length > 0
+        ? cfg.pockets
+            .filter(p => p && typeof p === 'object')
+            .map(p => ({ x: _num(p.x, 0), y: _num(p.y, 0) }))
+            .filter(p => Number.isFinite(p.x) && Number.isFinite(p.y))
+        : [...DEFAULT_CONFIG.pockets];
+    const striker = cfg.striker && typeof cfg.striker === 'object'
+        ? {
+            y: _num(cfg.striker.y, DEFAULT_CONFIG.striker.y),
+            minX: _num(cfg.striker.minX, DEFAULT_CONFIG.striker.minX),
+            maxX: _num(cfg.striker.maxX, DEFAULT_CONFIG.striker.maxX),
+        }
+        : { ...DEFAULT_CONFIG.striker };
+    const aiStriker = cfg.aiStriker && typeof cfg.aiStriker === 'object'
+        ? {
+            y: _num(cfg.aiStriker.y, DEFAULT_CONFIG.aiStriker.y),
+            minX: _num(cfg.aiStriker.minX, DEFAULT_CONFIG.aiStriker.minX),
+            maxX: _num(cfg.aiStriker.maxX, DEFAULT_CONFIG.aiStriker.maxX),
+        }
+        : { ...DEFAULT_CONFIG.aiStriker };
+    if (striker.minX > striker.maxX)
+        [striker.minX, striker.maxX] = [striker.maxX, striker.minX];
+    if (aiStriker.minX > aiStriker.maxX)
+        [aiStriker.minX, aiStriker.maxX] = [aiStriker.maxX, aiStriker.minX];
+    return {
+        walls,
+        pockets: pockets.length ? pockets : [...DEFAULT_CONFIG.pockets],
+        pocketRadius: _num(cfg.pocketRadius, DEFAULT_CONFIG.pocketRadius),
+        striker,
+        aiStriker,
+    };
+}
+function _normalizeCoinLayout(input) {
+    if (!Array.isArray(input))
+        return COIN_LAYOUT;
+    const raw = input
+        .filter(c => c && typeof c === 'object')
+        .map(c => {
+        const kind = c.kind ?? c.type;
+        const x = c.x;
+        const y = c.y;
+        return { kind, x, y };
+    })
+        .filter(c => (c.kind === 'black' || c.kind === 'white' || c.kind === 'red')
+        && typeof c.x === 'number' && Number.isFinite(c.x)
+        && typeof c.y === 'number' && Number.isFinite(c.y));
+    if (raw.length === 0)
+        return COIN_LAYOUT;
+    let red = 0;
+    let black = 0;
+    let white = 0;
+    return raw.map((c) => {
+        if (c.kind === 'red')
+            return { id: (++red === 1) ? 'red' : `r${red}`, ...c };
+        if (c.kind === 'black')
+            return { id: `b${++black}`, ...c };
+        return { id: `w${++white}`, ...c };
+    });
+}
 // ── Room ──────────────────────────────────────────────────────────────────────
 class CarromRoom extends colyseus_1.Room {
     constructor() {
         super(...arguments);
         this.maxClients = 2;
+        this._config = DEFAULT_CONFIG;
+        this._rails = { bottom: DEFAULT_CONFIG.striker, top: DEFAULT_CONFIG.aiStriker };
         this._strikerIds = {};
         this._coinIds = {};
         this._coins = new Map();
@@ -64,11 +140,13 @@ class CarromRoom extends colyseus_1.Room {
         this._simulating = false;
     }
     // ── Lifecycle ─────────────────────────────────────────────────────────────
-    onCreate(_options) {
+    onCreate(options) {
         // No setState — plain objects only, avoids client schema decode crash
+        this._config = _normalizeConfig(options?.gameConfig);
+        this._rails = { bottom: this._config.striker, top: this._config.aiStriker };
         this._physics = new PhysicsSystem_1.PhysicsSystem();
-        this._physics.setWalls(130, 670, 130, 670);
-        this._initCoins();
+        this._physics.setWalls(this._config.walls.left, this._config.walls.right, this._config.walls.top, this._config.walls.bottom);
+        this._initCoins(_normalizeCoinLayout(options?.coinLayout));
         this.onMessage('fire', (client, data) => this._handleFire(client, data));
         this.onMessage('ready', (client) => this._handleReady(client));
         this.onMessage('striker_pos', (client, data) => this._handleStrikerPos(client, data));
@@ -83,8 +161,9 @@ class CarromRoom extends colyseus_1.Room {
             connected: true,
         };
         this._players.set(client.sessionId, player);
-        const rail = isFirst ? RAILS.bottom : RAILS.top;
-        const sid = this._physics.createKinematicCircle(rail.minX, rail.y, STRIKER_RADIUS);
+        const rail = isFirst ? this._rails.bottom : this._rails.top;
+        const sx = (rail.minX + rail.maxX) / 2;
+        const sid = this._physics.createKinematicCircle(sx, rail.y, STRIKER_RADIUS);
         this._strikerIds[client.sessionId] = sid;
         console.log(`[room] ${client.sessionId} joined as ${player.side}`);
         if (this._players.size === 2) {
@@ -120,7 +199,7 @@ class CarromRoom extends colyseus_1.Room {
             const coins = Array.from(this._coins.values()).map(c => ({
                 id: c.id, kind: c.kind, x: c.x, y: c.y,
             }));
-            this.broadcast('game_start', { turn: this._turn, coins });
+            this.broadcast('game_start', { turn: this._turn, coins, config: this._config });
             console.log(`[room] game started — first turn: ${this._turn}`);
         }
     }
@@ -132,7 +211,7 @@ class CarromRoom extends colyseus_1.Room {
         if (this._simulating)
             return;
         const player = this._players.get(client.sessionId);
-        const rail = RAILS[player.side];
+        const rail = this._rails[player.side];
         const sx = Math.max(rail.minX, Math.min(rail.maxX, data.strikerX));
         const sy = rail.y;
         const sid = this._strikerIds[client.sessionId];
@@ -186,8 +265,8 @@ class CarromRoom extends colyseus_1.Room {
             if (!coin || !coin.active)
                 continue;
             const pos = this._physics.getPosition(physId);
-            for (const pocket of POCKETS) {
-                if (Math.hypot(pos.x - pocket.x, pos.y - pocket.y) < POCKET_RADIUS) {
+            for (const pocket of this._config.pockets) {
+                if (Math.hypot(pos.x - pocket.x, pos.y - pocket.y) < this._config.pocketRadius) {
                     coin.active = false;
                     coin.x = pocket.x;
                     coin.y = pocket.y;
@@ -198,8 +277,8 @@ class CarromRoom extends colyseus_1.Room {
             }
         }
         const sp = this._physics.getPosition(strikerId);
-        for (const pocket of POCKETS) {
-            if (Math.hypot(sp.x - pocket.x, sp.y - pocket.y) < POCKET_RADIUS) {
+        for (const pocket of this._config.pockets) {
+            if (Math.hypot(sp.x - pocket.x, sp.y - pocket.y) < this._config.pocketRadius) {
                 this._physics.setVelocity(strikerId, 0, 0);
                 this._physics.setBodyType(strikerId, 'kinematic');
                 this._physics.setPosition(strikerId, -200, -200);
@@ -239,8 +318,8 @@ class CarromRoom extends colyseus_1.Room {
             .find(id => id !== currentSessionId);
         this._turn = next ?? currentSessionId;
     }
-    _initCoins() {
-        for (const coin of COIN_LAYOUT) {
+    _initCoins(layout) {
+        for (const coin of layout) {
             const info = { ...coin, active: true };
             this._coins.set(coin.id, info);
             const physId = this._physics.createDynamicCircle(coin.x, coin.y, COIN_RADIUS);
