@@ -14,7 +14,7 @@ const server = new colyseus_1.Server({
         app.use('/colyseus', (0, colyseus_1.monitor)());
     },
 });
-server.define('carrom', CarromRoom_1.CarromRoom).enableRealtimeListing();
+server.define('carrom', CarromRoom_1.CarromRoom).filterBy(['code']).enableRealtimeListing();
 server.listen(PORT).then(() => {
     console.log(`\n  Colyseus server running`);
     console.log(`  WebSocket  → ws://localhost:${PORT}`);

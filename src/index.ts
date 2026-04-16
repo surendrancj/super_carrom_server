@@ -12,7 +12,7 @@ const server = new Server({
     },
 });
 
-server.define('carrom', CarromRoom).enableRealtimeListing();
+server.define('carrom', CarromRoom).filterBy(['code']).enableRealtimeListing();
 
 server.listen(PORT).then(() => {
     console.log(`\n  Colyseus server running`);
