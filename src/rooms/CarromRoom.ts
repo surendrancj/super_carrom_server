@@ -1,5 +1,14 @@
 import { Room, Client } from 'colyseus';
 import { PhysicsSystem } from '../physics/PhysicsSystem';
+import { MatchState, PlayerSide, coinKindForSide } from '../game/MatchState';
+import {
+    createMatchState,
+    resolveShot,
+    setPlayer,
+    setPlayerReady,
+    startMatch,
+    syncCoinPositions,
+} from '../game/RuleEngine';
 
 // ── Constants (must match client GameConfig) ──────────────────────────────────
 // Must match client src/config/GameConfig.js exactly
@@ -89,6 +98,13 @@ interface ShotMessage {
     power:    number;
 }
 
+interface AimMessage {
+    strikerX: number;
+    angle:    number;
+    power:    number;
+    active:   boolean;
+}
+
 function _num(n: any, fallback: number) {
     return (typeof n === 'number' && Number.isFinite(n)) ? n : fallback;
 }
@@ -173,6 +189,7 @@ export class CarromRoom extends Room {
     maxClients = 2;
 
     private _physics!:   PhysicsSystem;
+    private _match!:     MatchState;
     private _config:     Required<GameConfigWire> = DEFAULT_CONFIG;
     private _rails:      Record<Side, RailConfig> = { bottom: DEFAULT_CONFIG.striker, top: DEFAULT_CONFIG.aiStriker };
     private _strikerIds: Record<string, number> = {};
@@ -182,6 +199,8 @@ export class CarromRoom extends Room {
     private _turn        = '';
     private _phase       = 'waiting';
     private _simulating  = false;
+    private _pottedThisShot = new Set<string>();
+    private _strikerFoulThisShot = false;
 
     // ── Lifecycle ─────────────────────────────────────────────────────────────
 
@@ -197,10 +216,18 @@ export class CarromRoom extends Room {
             this._config.walls.bottom,
         );
         this._initCoins(_normalizeCoinLayout(options?.coinLayout));
+        this._match = createMatchState(Array.from(this._coins.values()).map(c => ({
+            id: c.id,
+            kind: c.kind as 'black' | 'white' | 'red',
+            x: c.x,
+            y: c.y,
+            active: c.active,
+        })));
 
         this.onMessage('fire',        (client, data: ShotMessage)    => this._handleFire(client, data));
         this.onMessage('ready',       (client)                        => this._handleReady(client));
         this.onMessage('striker_pos', (client, data: { x: number })  => this._handleStrikerPos(client, data));
+        this.onMessage('aim',         (client, data: AimMessage)     => this._handleAim(client, data));
 
         console.log(`[room] ${this.roomId} created`);
     }
@@ -214,6 +241,13 @@ export class CarromRoom extends Room {
             connected: true,
         };
         this._players.set(client.sessionId, player);
+        this._match = setPlayer(this._match, {
+            sessionId: player.sessionId,
+            side: player.side as PlayerSide,
+            coinKind: coinKindForSide(player.side as PlayerSide),
+            ready: player.ready,
+            connected: player.connected,
+        });
 
         const rail = isFirst ? this._rails.bottom : this._rails.top;
         const sx = (rail.minX + rail.maxX) / 2;
@@ -249,17 +283,23 @@ export class CarromRoom extends Room {
     private _handleReady(client: Client) {
         const player = this._players.get(client.sessionId);
         if (player) player.ready = true;
+        this._match = setPlayerReady(this._match, client.sessionId);
 
         const players = Array.from(this._players.values());
         if (players.length === 2 && players.every(p => p.ready)) {
-            this._phase = 'playing';
-            const first = players.find(p => p.side === 'bottom')!;
-            this._turn  = first.sessionId;
+            this._match = startMatch(this._match);
+            this._phase = this._match.phase;
+            this._turn  = this._match.turn;
             // Include coin layout so clients can assign matching string IDs and snap positions
             const coins = Array.from(this._coins.values()).map(c => ({
                 id: c.id, kind: c.kind, x: c.x, y: c.y,
             }));
-            this.broadcast('game_start', { turn: this._turn, coins, config: this._config });
+            this.broadcast('game_start', {
+                turn: this._turn,
+                coins,
+                config: this._config,
+                matchState: this._match,
+            });
             console.log(`[room] game started — first turn: ${this._turn}`);
         }
     }
@@ -268,6 +308,8 @@ export class CarromRoom extends Room {
         if (this._phase !== 'playing') return;
         if (client.sessionId !== this._turn) return;
         if (this._simulating) return;
+        this._pottedThisShot.clear();
+        this._strikerFoulThisShot = false;
 
         const player = this._players.get(client.sessionId)!;
         const rail   = this._rails[player.side];
@@ -340,6 +382,7 @@ export class CarromRoom extends Room {
                     coin.active = false;
                     coin.x = pocket.x;
                     coin.y = pocket.y;
+                    this._pottedThisShot.add(coinStrId);
                     this._physics.setVelocity(physId, 0, 0);
                     this._physics.setBodyType(physId, 'kinematic');
                     break;
@@ -353,6 +396,7 @@ export class CarromRoom extends Room {
                 this._physics.setVelocity(strikerId, 0, 0);
                 this._physics.setBodyType(strikerId, 'kinematic');
                 this._physics.setPosition(strikerId, -200, -200);
+                this._strikerFoulThisShot = true;
                 break;
             }
         }
@@ -372,11 +416,31 @@ export class CarromRoom extends Room {
             settledCoins[coinStrId] = { x: pos.x, y: pos.y, active: coin.active };
         }
 
-        this._switchTurn(firingSessionId);
+        const firingPlayer = this._players.get(firingSessionId);
+        if (!firingPlayer) return;
+
+        this._match = syncCoinPositions(this._match, settledCoins);
+        this._match = resolveShot(this._match, {
+            firedBy: firingPlayer.side as PlayerSide,
+            pottedCoinIds: Array.from(this._pottedThisShot),
+            strikerFoul: this._strikerFoulThisShot,
+        });
+        this._phase = this._match.phase;
+        this._turn = this._match.turn;
+
+        const revived = this._match.lastShot?.reviveCoinIds ?? [];
+        revived.forEach((coinId, idx) => {
+            const pos = this._reviveCoin(coinId, idx);
+            if (pos) {
+                settledCoins[coinId] = { x: pos.x, y: pos.y, active: true };
+            }
+        });
 
         this.broadcast('settled', {
             coins: settledCoins,
             turn:  this._turn,
+            matchState: this._match,
+            shotResult: this._match.lastShot,
         });
 
         console.log(`[room] settled — turn → ${this._turn}`);
@@ -388,12 +452,64 @@ export class CarromRoom extends Room {
         this.broadcast('striker_pos', { x: data.x }, { except: client });
     }
 
+    private _handleAim(client: Client, data: AimMessage) {
+        if (client.sessionId !== this._turn) return;
+        if (this._phase !== 'playing') return;
+        if (this._simulating) return;
+        if (!data) return;
+        this.broadcast('aim', {
+            strikerX: data.strikerX,
+            angle: data.angle,
+            power: data.power,
+            active: !!data.active,
+        }, { except: client });
+    }
+
     // ── Helpers ───────────────────────────────────────────────────────────────
 
     private _switchTurn(currentSessionId: string) {
         const next = Array.from(this._players.keys())
             .find(id => id !== currentSessionId);
         this._turn = next ?? currentSessionId;
+    }
+
+    private _reviveCoin(coinStrId: string, slot: number): { x: number; y: number } | null {
+        const coin = this._coins.get(coinStrId);
+        const physId = this._coinIds[coinStrId];
+        if (!coin || !physId) return null;
+
+        const pos = this._revivePosition(slot);
+        coin.active = true;
+        coin.x = pos.x;
+        coin.y = pos.y;
+        this._physics.setVelocity(physId, 0, 0);
+        this._physics.setBodyType(physId, 'dynamic');
+        this._physics.setPosition(physId, pos.x, pos.y);
+
+        if (this._match.coins[coinStrId]) {
+            this._match.coins[coinStrId] = {
+                ...this._match.coins[coinStrId],
+                x: pos.x,
+                y: pos.y,
+                active: true,
+            };
+        }
+
+        return pos;
+    }
+
+    private _revivePosition(slot: number): { x: number; y: number } {
+        const offsets = [
+            { x: 0, y: 0 },
+            { x: 30, y: 0 },
+            { x: -30, y: 0 },
+            { x: 0, y: 30 },
+            { x: 0, y: -30 },
+            { x: 22, y: 22 },
+            { x: -22, y: -22 },
+        ];
+        const o = offsets[slot % offsets.length];
+        return { x: 400 + o.x, y: 400 + o.y };
     }
 
     private _initCoins(layout: Array<{ id: string; kind: 'black' | 'white' | 'red'; x: number; y: number }>) {

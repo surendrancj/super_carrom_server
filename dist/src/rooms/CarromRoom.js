@@ -3,6 +3,8 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.CarromRoom = void 0;
 const colyseus_1 = require("colyseus");
 const PhysicsSystem_1 = require("../physics/PhysicsSystem");
+const MatchState_1 = require("../game/MatchState");
+const RuleEngine_1 = require("../game/RuleEngine");
 // ── Constants (must match client GameConfig) ──────────────────────────────────
 // Must match client src/config/GameConfig.js exactly
 const COIN_RADIUS = 14.2; // COIN.physicsRadius
@@ -138,6 +140,8 @@ class CarromRoom extends colyseus_1.Room {
         this._turn = '';
         this._phase = 'waiting';
         this._simulating = false;
+        this._pottedThisShot = new Set();
+        this._strikerFoulThisShot = false;
     }
     // ── Lifecycle ─────────────────────────────────────────────────────────────
     onCreate(options) {
@@ -147,9 +151,17 @@ class CarromRoom extends colyseus_1.Room {
         this._physics = new PhysicsSystem_1.PhysicsSystem();
         this._physics.setWalls(this._config.walls.left, this._config.walls.right, this._config.walls.top, this._config.walls.bottom);
         this._initCoins(_normalizeCoinLayout(options?.coinLayout));
+        this._match = (0, RuleEngine_1.createMatchState)(Array.from(this._coins.values()).map(c => ({
+            id: c.id,
+            kind: c.kind,
+            x: c.x,
+            y: c.y,
+            active: c.active,
+        })));
         this.onMessage('fire', (client, data) => this._handleFire(client, data));
         this.onMessage('ready', (client) => this._handleReady(client));
         this.onMessage('striker_pos', (client, data) => this._handleStrikerPos(client, data));
+        this.onMessage('aim', (client, data) => this._handleAim(client, data));
         console.log(`[room] ${this.roomId} created`);
     }
     onJoin(client) {
@@ -161,6 +173,13 @@ class CarromRoom extends colyseus_1.Room {
             connected: true,
         };
         this._players.set(client.sessionId, player);
+        this._match = (0, RuleEngine_1.setPlayer)(this._match, {
+            sessionId: player.sessionId,
+            side: player.side,
+            coinKind: (0, MatchState_1.coinKindForSide)(player.side),
+            ready: player.ready,
+            connected: player.connected,
+        });
         const rail = isFirst ? this._rails.bottom : this._rails.top;
         const sx = (rail.minX + rail.maxX) / 2;
         const sid = this._physics.createKinematicCircle(sx, rail.y, STRIKER_RADIUS);
@@ -190,16 +209,22 @@ class CarromRoom extends colyseus_1.Room {
         const player = this._players.get(client.sessionId);
         if (player)
             player.ready = true;
+        this._match = (0, RuleEngine_1.setPlayerReady)(this._match, client.sessionId);
         const players = Array.from(this._players.values());
         if (players.length === 2 && players.every(p => p.ready)) {
-            this._phase = 'playing';
-            const first = players.find(p => p.side === 'bottom');
-            this._turn = first.sessionId;
+            this._match = (0, RuleEngine_1.startMatch)(this._match);
+            this._phase = this._match.phase;
+            this._turn = this._match.turn;
             // Include coin layout so clients can assign matching string IDs and snap positions
             const coins = Array.from(this._coins.values()).map(c => ({
                 id: c.id, kind: c.kind, x: c.x, y: c.y,
             }));
-            this.broadcast('game_start', { turn: this._turn, coins, config: this._config });
+            this.broadcast('game_start', {
+                turn: this._turn,
+                coins,
+                config: this._config,
+                matchState: this._match,
+            });
             console.log(`[room] game started — first turn: ${this._turn}`);
         }
     }
@@ -210,6 +235,8 @@ class CarromRoom extends colyseus_1.Room {
             return;
         if (this._simulating)
             return;
+        this._pottedThisShot.clear();
+        this._strikerFoulThisShot = false;
         const player = this._players.get(client.sessionId);
         const rail = this._rails[player.side];
         const sx = Math.max(rail.minX, Math.min(rail.maxX, data.strikerX));
@@ -270,6 +297,7 @@ class CarromRoom extends colyseus_1.Room {
                     coin.active = false;
                     coin.x = pocket.x;
                     coin.y = pocket.y;
+                    this._pottedThisShot.add(coinStrId);
                     this._physics.setVelocity(physId, 0, 0);
                     this._physics.setBodyType(physId, 'kinematic');
                     break;
@@ -282,6 +310,7 @@ class CarromRoom extends colyseus_1.Room {
                 this._physics.setVelocity(strikerId, 0, 0);
                 this._physics.setBodyType(strikerId, 'kinematic');
                 this._physics.setPosition(strikerId, -200, -200);
+                this._strikerFoulThisShot = true;
                 break;
             }
         }
@@ -298,10 +327,29 @@ class CarromRoom extends colyseus_1.Room {
             coin.y = pos.y;
             settledCoins[coinStrId] = { x: pos.x, y: pos.y, active: coin.active };
         }
-        this._switchTurn(firingSessionId);
+        const firingPlayer = this._players.get(firingSessionId);
+        if (!firingPlayer)
+            return;
+        this._match = (0, RuleEngine_1.syncCoinPositions)(this._match, settledCoins);
+        this._match = (0, RuleEngine_1.resolveShot)(this._match, {
+            firedBy: firingPlayer.side,
+            pottedCoinIds: Array.from(this._pottedThisShot),
+            strikerFoul: this._strikerFoulThisShot,
+        });
+        this._phase = this._match.phase;
+        this._turn = this._match.turn;
+        const revived = this._match.lastShot?.reviveCoinIds ?? [];
+        revived.forEach((coinId, idx) => {
+            const pos = this._reviveCoin(coinId, idx);
+            if (pos) {
+                settledCoins[coinId] = { x: pos.x, y: pos.y, active: true };
+            }
+        });
         this.broadcast('settled', {
             coins: settledCoins,
             turn: this._turn,
+            matchState: this._match,
+            shotResult: this._match.lastShot,
         });
         console.log(`[room] settled — turn → ${this._turn}`);
     }
@@ -312,11 +360,62 @@ class CarromRoom extends colyseus_1.Room {
             return;
         this.broadcast('striker_pos', { x: data.x }, { except: client });
     }
+    _handleAim(client, data) {
+        if (client.sessionId !== this._turn)
+            return;
+        if (this._phase !== 'playing')
+            return;
+        if (this._simulating)
+            return;
+        if (!data)
+            return;
+        this.broadcast('aim', {
+            strikerX: data.strikerX,
+            angle: data.angle,
+            power: data.power,
+            active: !!data.active,
+        }, { except: client });
+    }
     // ── Helpers ───────────────────────────────────────────────────────────────
     _switchTurn(currentSessionId) {
         const next = Array.from(this._players.keys())
             .find(id => id !== currentSessionId);
         this._turn = next ?? currentSessionId;
+    }
+    _reviveCoin(coinStrId, slot) {
+        const coin = this._coins.get(coinStrId);
+        const physId = this._coinIds[coinStrId];
+        if (!coin || !physId)
+            return null;
+        const pos = this._revivePosition(slot);
+        coin.active = true;
+        coin.x = pos.x;
+        coin.y = pos.y;
+        this._physics.setVelocity(physId, 0, 0);
+        this._physics.setBodyType(physId, 'dynamic');
+        this._physics.setPosition(physId, pos.x, pos.y);
+        if (this._match.coins[coinStrId]) {
+            this._match.coins[coinStrId] = {
+                ...this._match.coins[coinStrId],
+                x: pos.x,
+                y: pos.y,
+                active: true,
+            };
+        }
+        return pos;
+    }
+    _revivePosition(slot) {
+        const offsets = [
+            { x: 0, y: 0 },
+            { x: 30, y: 0 },
+            { x: -30, y: 0 },
+            { x: 0, y: 30 },
+            { x: 0, y: -30 },
+            { x: 22, y: 22 },
+            { x: -22, y: -22 },
+        ];
+        const o = offsets[slot % offsets.length];
+        return { x: 400 + o.x, y: 400 + o.y };
     }
     _initCoins(layout) {
         for (const coin of layout) {
