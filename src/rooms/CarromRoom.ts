@@ -12,10 +12,37 @@ const POCKETS = [
     { x: 130, y: 670 }, { x: 670, y: 670 },
 ];
 
-// TEST MODE: single coin for sync debugging
-const COIN_LAYOUT = [
-    { id: 'b1', kind: 'black', x: 400, y: 400 },
-];
+const COIN_LAYOUT: Array<{ id: string; kind: 'black' | 'white' | 'red'; x: number; y: number }> = (() => {
+    const raw: Array<{ kind: 'black' | 'white' | 'red'; x: number; y: number }> = [
+        { x: 400, y: 400, kind: 'red' },
+        { x: 427.24, y: 393.36, kind: 'black' },
+        { x: 419.57, y: 422.46, kind: 'white' },
+        { x: 391.03, y: 428.02, kind: 'black' },
+        { x: 372.53, y: 405.65, kind: 'white' },
+        { x: 379.51, y: 378.1, kind: 'black' },
+        { x: 408.99, y: 370.6, kind: 'white' },
+        { x: 455.04, y: 387.29, kind: 'black' },
+        { x: 447.9, y: 416.02, kind: 'white' },
+        { x: 437.53, y: 445.28, kind: 'black' },
+        { x: 410.65, y: 450.65, kind: 'white' },
+        { x: 380.88, y: 455.58, kind: 'black' },
+        { x: 362.06, y: 433.93, kind: 'white' },
+        { x: 344.07, y: 411.87, kind: 'black' },
+        { x: 350.95, y: 383.55, kind: 'white' },
+        { x: 359.47, y: 356.81, kind: 'black' },
+        { x: 388.54, y: 348.84, kind: 'white' },
+        { x: 416.04, y: 341.67, kind: 'black' },
+        { x: 437.05, y: 362.99, kind: 'white' },
+    ];
+
+    let black = 0;
+    let white = 0;
+    return raw.map((c) => {
+        if (c.kind === 'red') return { id: 'red', ...c };
+        if (c.kind === 'black') return { id: `b${++black}`, ...c };
+        return { id: `w${++white}`, ...c };
+    });
+})();
 
 const RAILS = {
     bottom: { y: 645, minX: 220, maxX: 580 },

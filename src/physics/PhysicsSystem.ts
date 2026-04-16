@@ -75,10 +75,6 @@ export class PhysicsSystem {
         const b = this._bodies.get(id);
         if (!b) return;
         b.type = type;
-        if (type === 'dynamic') {
-            b.mass = PHYSICS.striker.density;
-            b.restitution = PHYSICS.striker.restitution;
-        }
     }
 
     // ── Queries ───────────────────────────────────────────────────────────────
