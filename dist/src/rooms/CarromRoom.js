@@ -12,26 +12,9 @@ const POCKETS = [
     { x: 130, y: 130 }, { x: 670, y: 130 },
     { x: 130, y: 670 }, { x: 670, y: 670 },
 ];
+// TEST MODE: single coin for sync debugging
 const COIN_LAYOUT = [
-    { id: 'red', kind: 'red', x: 400, y: 400 },
-    { id: 'b1', kind: 'black', x: 400, y: 369.25 },
-    { id: 'w1', kind: 'white', x: 426.63, y: 384.63 },
-    { id: 'b2', kind: 'black', x: 426.63, y: 415.38 },
-    { id: 'w2', kind: 'white', x: 400, y: 430.75 },
-    { id: 'b3', kind: 'black', x: 373.37, y: 415.38 },
-    { id: 'w3', kind: 'white', x: 373.37, y: 384.63 },
-    { id: 'b4', kind: 'black', x: 400, y: 337.75 },
-    { id: 'w4', kind: 'white', x: 431.13, y: 346.09 },
-    { id: 'b5', kind: 'black', x: 453.91, y: 368.88 },
-    { id: 'w5', kind: 'white', x: 462.25, y: 400 },
-    { id: 'b6', kind: 'black', x: 453.91, y: 431.13 },
-    { id: 'w6', kind: 'white', x: 431.13, y: 453.91 },
-    { id: 'b7', kind: 'black', x: 400, y: 462.25 },
-    { id: 'w7', kind: 'white', x: 368.88, y: 453.91 },
-    { id: 'b8', kind: 'black', x: 346.09, y: 431.13 },
-    { id: 'w8', kind: 'white', x: 337.75, y: 400 },
-    { id: 'b9', kind: 'black', x: 346.09, y: 368.88 },
-    { id: 'w9', kind: 'white', x: 368.88, y: 346.09 },
+    { id: 'b1', kind: 'black', x: 400, y: 400 },
 ];
 const RAILS = {
     bottom: { y: 645, minX: 220, maxX: 580 },
